@@ -1,0 +1,169 @@
+---
+
+- name: Install spike and a riscv cross compiler then test the example plugin.
+  hosts: all
+  vars:
+     install_dir: "{{ ansible_env.HOME }}"
+     riscv_fesvr_repo: "https://github.com/riscv/riscv-fesvr.git"
+     riscv_fesvr_version: master
+     riscv_isa_sim_repo: "https://github.com/vexingcodes/riscv-isa-sim.git"
+     riscv_isa_sim_version: master
+     crosstool_ng_repo: "https://github.com/crosstool-ng/crosstool-ng"
+     crosstool_ng_version: master
+     spike_plugin_repo: "https://github.com/vexingcodes/spike-plugin.git"
+     spike_plugin_version: master
+  tasks:
+
+    - name: Get Debian up to date.
+      become: yes
+      apt:
+        upgrade: dist
+        update_cache: true
+
+    - name: Install necessary packages.
+      become: yes
+      apt:
+        install_recommends: no
+        name:
+          - autoconf
+          - bison
+          - build-essential
+          - device-tree-compiler
+          - flex
+          - help2man
+          - libncurses5-dev
+          - gawk
+          - git
+          - gperf
+          - python-dev
+          - texinfo
+          - vim
+
+    - name: Make output directory for riscv tools.
+      file:
+        path: "{{ install_dir }}/riscv"
+        state: directory
+
+    - name: Get riscv-fesvr code.
+      git:
+        repo: "{{ riscv_fesvr_repo }}"
+        dest: "{{ install_dir }}/riscv-fesvr"
+        version: "{{ riscv_fesvr_version }}"
+
+    - name: Make riscv-fesvr build directory.
+      file:
+        path: "{{ install_dir }}/riscv-fesvr/build"
+        state: directory
+
+    - name: Configure riscv-fesvr.
+      command: "../configure --prefix={{ install_dir }}/riscv"
+      args:
+        chdir: "{{ install_dir }}/riscv-fesvr/build"
+        creates: "{{ install_dir }}/riscv-fesvr/build/Makefile"
+
+    - name: Build riscv-fesvr.
+      command: make install
+      args:
+        chdir: "{{ install_dir }}/riscv-fesvr/build"
+        creates: "{{ install_dir }}/riscv/lib/libfesvr.so"
+
+    - name: Get riscv-isa-sim code.
+      git:
+        repo: "{{ riscv_isa_sim_repo }}"
+        dest: "{{ install_dir }}/riscv-isa-sim"
+        version: "{{ riscv_isa_sim_version }}"
+
+    - name: Make riscv-isa-sim build directory.
+      file:
+        path: "{{ install_dir }}/riscv-isa-sim/build"
+        state: directory
+
+    - name: Configure riscv-isa-sim.
+      command: "../configure \
+                LDFLAGS=-L{{ install_dir }}/riscv/lib \
+                --prefix={{ install_dir }}/riscv"
+      args:
+        chdir: "{{ install_dir }}/riscv-isa-sim/build"
+        creates: "{{ install_dir }}/riscv-isa-sim/build/Makefile"
+
+    - name: Build riscv-isa-sim.
+      command: "make install CXXFLAGS=-I{{ ansible_env.HOME }}/riscv/include"
+      args:
+        chdir: "{{ install_dir }}/riscv-isa-sim/build"
+        creates: "{{ install_dir }}/riscv/bin/spike"
+
+    - name: Make output directory for cross compiler.
+      file:
+        path: "{{ install_dir }}/x-tools"
+        state: directory
+
+    - name: Get crosstool-ng source.
+      git:
+        repo: "{{ crosstool_ng_repo }}"
+        dest: "{{ install_dir }}/crosstool-ng"
+        version: "{{ crosstool_ng_version }}"
+
+    - name: Bootstrap crosstool-ng.
+      command: ./bootstrap
+      args:
+        chdir: "{{ install_dir }}/crosstool-ng"
+        creates: "{{ install_dir }}/crosstool-ng/configure"
+
+    - name: Configure crosstool-ng.
+      command: ./configure --enable-local
+      args:
+        chdir: "{{ install_dir }}/crosstool-ng"
+        creates: "{{ install_dir }}/crosstool-ng/Makefile"
+
+    - name: Build crosstool-ng.
+      command: make
+      args:
+        chdir: "{{ install_dir }}/crosstool-ng"
+        creates: "{{ install_dir }}/crosstool-ng/ct-ng"
+
+    - name: Configure crosstool-ng for riscv32-hifive1-elf.
+      command: ./ct-ng riscv32-hifive1-elf
+      args:
+        chdir: "{{ install_dir }}/crosstool-ng"
+        creates: "{{ install_dir }}/crosstool-ng/.config"
+
+    - name: Change the prefix for the cross compiler install.
+      lineinfile:
+        dest: "{{ install_dir }}/crosstool-ng/.config"
+        regexp: "^CT_PREFIX_DIR="
+        line: "CT_PREFIX_DIR={{ install_dir }}/x-tools"
+
+    - name: Build the cross compiler.
+      command: ./ct-ng build
+      args:
+        chdir: "{{ install_dir }}/crosstool-ng"
+        creates: "{{ install_dir }}/x-tools/bin/riscv32-hifive1-elf-gcc"
+
+    - name: Update bashrc.
+      lineinfile:
+        dest: ~/.bashrc
+        line: "export PATH=${PATH}:\
+                           {{ install_dir }}/x-tools/bin:\
+                           {{ install_dir }}/riscv/bin"
+
+    - name: Get simple example code to test.
+      git:
+        repo: "{{ spike_plugin_repo }}"
+        dest: "{{ install_dir }}/spike-plugin"
+        version: "{{ spike_plugin_version }}"
+
+    - name: Run the sample code to make sure all the tools work together.
+      command: timeout 5s make
+      args:
+        chdir: "{{ install_dir }}/spike-plugin"
+        creates: "{{ install_dir }}/spike_plugin/plugin_test"
+      environment:
+        SPIKE_INCLUDE_DIR: "{{ ansible_env.HOME }}/riscv/include"
+        PATH: "{{ ansible_env.PATH }}:\
+               {{ install_dir }}/x-tools/bin:\
+               {{ install_dir }}/riscv/bin"
+      register: test_output
+
+    - name: Show the test output.
+      debug:
+        msg: "{{ test_output }}"
